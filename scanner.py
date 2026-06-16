@@ -9,7 +9,6 @@ Criteria (from strategy description):
 
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
 import numpy as np
 from datetime import datetime, timedelta
 import time
@@ -17,6 +16,29 @@ import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Indicator math (pure pandas/numpy — no compiled dependencies)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def rsi(series: pd.Series, length: int = 14) -> pd.Series:
+    """Wilder's RSI, pure pandas implementation."""
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    out = 100 - (100 / (1 + rs))
+    out = out.where(avg_loss != 0, 100)  # all gains -> RSI 100
+    return out
+
+
+def sma(series: pd.Series, length: int) -> pd.Series:
+    return series.rolling(length).mean()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -81,10 +103,10 @@ def _calc_indicators(df: pd.DataFrame) -> dict | None:
     vol   = df["Volume"]
 
     # RSI (14)
-    rsi_series = ta.rsi(close, length=14)
+    rsi_series = rsi(close, length=14)
     if rsi_series is None or rsi_series.dropna().empty:
         return None
-    rsi = float(rsi_series.iloc[-1])
+    rsi_val = float(rsi_series.iloc[-1])
 
     # Volume ratio vs 20-day average
     vol_avg = float(vol.rolling(20).mean().iloc[-1])
@@ -105,7 +127,7 @@ def _calc_indicators(df: pd.DataFrame) -> dict | None:
     low_52w  = float(close.tail(252).min())
 
     # Simple trend context: SMA50 slope
-    sma50 = ta.sma(close, length=50)
+    sma50 = sma(close, length=50)
     sma50_slope = None
     if sma50 is not None and len(sma50.dropna()) >= 5:
         sma50_slope = float(sma50.iloc[-1]) - float(sma50.iloc[-5])
@@ -116,7 +138,7 @@ def _calc_indicators(df: pd.DataFrame) -> dict | None:
 
     return {
         "price":              price,
-        "rsi":                round(rsi, 1),
+        "rsi":                round(rsi_val, 1),
         "vol_ratio":          round(vol_ratio, 2),
         "support":            round(support, 4),
         "pct_above_support":  round(pct_above_support, 2),
@@ -247,8 +269,8 @@ def get_chart_data(ticker: str, period: str = "6mo") -> pd.DataFrame | None:
     df = data[ticker].copy()
     if len(df) < 20:
         return None
-    df["RSI"]     = ta.rsi(df["Close"], length=14)
-    df["SMA50"]   = ta.sma(df["Close"], length=50)
-    df["SMA20"]   = ta.sma(df["Close"], length=20)
+    df["RSI"]     = rsi(df["Close"], length=14)
+    df["SMA50"]   = sma(df["Close"], length=50)
+    df["SMA20"]   = sma(df["Close"], length=20)
     df["Support"] = df["Low"].rolling(20).min().shift(1)
     return df

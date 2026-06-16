@@ -88,9 +88,10 @@ Streamlit installeert automatisch de `requirements.txt` en de app is binnen een 
 ```
 alpha-scanner/
 ├── app.py            # Streamlit UI
-├── scanner.py        # Scanner logica (RSI, support, volume)
+├── scanner.py        # Scanner logica (RSI, support, volume — pure pandas/numpy)
 ├── tickers.py        # Ticker universum (alle beurzen)
 ├── requirements.txt  # Python dependencies
+├── runtime.txt        # Pint Python-versie voor Streamlit Cloud (3.12)
 ├── .streamlit/
 │   └── config.toml   # Donker thema
 └── README.md
