@@ -176,6 +176,12 @@ with st.sidebar:
 
     st.markdown("---")
     scan_btn = st.button("▶  Start scan", type="primary", use_container_width=True)
+    st.markdown(
+        "<div style='font-size:0.68rem;color:#8b949e;margin-top:4px'>"
+        "Een volledige scan kan 3–6 minuten duren (Yahoo Finance rate-limits)."
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
     st.markdown("---")
     st.markdown(
@@ -292,8 +298,8 @@ if results is not None:
 
             styled = (
                 display_df.style
-                .applymap(style_rsi, subset=["RSI (14)"])
-                .applymap(style_vol, subset=["Vol ratio"])
+                .map(style_rsi, subset=["RSI (14)"])
+                .map(style_vol, subset=["Vol ratio"])
                 .format({
                     "Prijs":           "{:.2f}",
                     "RSI (14)":        "{:.1f}",

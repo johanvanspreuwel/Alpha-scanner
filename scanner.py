@@ -14,6 +14,8 @@ from datetime import datetime, timedelta
 import time
 import logging
 
+from tickers import get_company_name
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -45,22 +47,36 @@ def sma(series: pd.Series, length: int) -> pd.Series:
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _safe_download(tickers: list[str], period: str = "6mo", interval: str = "1d") -> dict[str, pd.DataFrame]:
-    """Download OHLCV for a batch of tickers; return {ticker: df}."""
+def _safe_download(
+    tickers: list[str],
+    period: str = "6mo",
+    interval: str = "1d",
+    max_retries: int = 3,
+) -> dict[str, pd.DataFrame]:
+    """Download OHLCV for a batch of tickers; return {ticker: df}.
+    Retries with exponential backoff on rate-limit errors."""
     if not tickers:
         return {}
-    try:
-        raw = yf.download(
-            tickers,
-            period=period,
-            interval=interval,
-            group_by="ticker",
-            auto_adjust=True,
-            threads=True,
-            progress=False,
-        )
-    except Exception as e:
-        logger.warning(f"Download error: {e}")
+
+    raw = None
+    for attempt in range(max_retries):
+        try:
+            raw = yf.download(
+                tickers,
+                period=period,
+                interval=interval,
+                group_by="ticker",
+                auto_adjust=True,
+                threads=False,   # sequential = gentler on Yahoo's rate limiter
+                progress=False,
+            )
+            break
+        except Exception as e:
+            wait = 5 * (attempt + 1)
+            logger.warning(f"Download error (attempt {attempt + 1}/{max_retries}): {e}. Wachten {wait}s…")
+            time.sleep(wait)
+
+    if raw is None or raw.empty:
         return {}
 
     result = {}
@@ -192,7 +208,8 @@ def alpha_conditions(ind: dict, params: dict) -> tuple[bool, list[str]]:
 # Main scan function
 # ─────────────────────────────────────────────────────────────────────────────
 
-BATCH_SIZE = 50   # tickers per yfinance call
+BATCH_SIZE = 20   # tickers per yfinance call — kept small to avoid Yahoo rate limits
+BATCH_PAUSE = 2.0  # seconds between batches
 
 def run_alpha_scan(
     tickers: list[str],
@@ -222,17 +239,9 @@ def run_alpha_scan(
 
             passed, reasons = alpha_conditions(ind, params)
             if passed:
-                # fetch company name
-                name = ticker
-                try:
-                    info = yf.Ticker(ticker).fast_info
-                    name = getattr(info, "display_name", ticker) or ticker
-                except Exception:
-                    pass
-
                 hits.append({
                     "Ticker":             ticker,
-                    "Naam":               name,
+                    "Naam":               get_company_name(ticker),
                     "Prijs":              ind["price"],
                     "RSI (14)":           ind["rsi"],
                     "Vol ratio":          ind["vol_ratio"],
@@ -248,8 +257,8 @@ def run_alpha_scan(
         if progress_callback:
             progress_callback(done, total)
 
-        # small pause to be polite to Yahoo
-        time.sleep(0.3)
+        # pause to be polite to Yahoo's rate limiter
+        time.sleep(BATCH_PAUSE)
 
     df_hits = pd.DataFrame(hits)
     if not df_hits.empty:
