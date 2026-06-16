@@ -10,6 +10,8 @@ Criteria (from strategy description):
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import requests
+from io import StringIO
 from datetime import datetime, timedelta
 import time
 import logging
@@ -44,18 +46,131 @@ def sma(series: pd.Series, length: int) -> pd.Series:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Helpers
+# Stooq data source (primary) — free, no API key, no aggressive rate limiting
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _safe_download(
+# Map our Yahoo-style exchange suffix to Stooq's country-code suffix.
+_YAHOO_TO_STOOQ_SUFFIX = {
+    "":     "us",   # no suffix -> US ticker (NYSE/Nasdaq)
+    ".AS":  "nl",
+    ".DE":  "de",
+    ".PA":  "fr",
+    ".L":   "uk",
+    ".MC":  "es",
+    ".SW":  "ch",
+    ".BR":  "be",
+    ".ST":  "se",
+    ".HE":  "fi",
+    ".CO":  "dk",
+    ".LS":  "pt",
+    ".VI":  "at",
+    ".MI":  "it",
+}
+
+_STOOQ_SESSION = requests.Session()
+_STOOQ_SESSION.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+})
+_stooq_warmed_up = False
+
+
+def _warm_up_stooq_session():
+    """Visit Stooq's homepage once to pick up the consent cookie European
+    visitors need before the CSV endpoint serves real data. Best-effort —
+    failures are silently ignored since the download call has its own
+    timeout and error handling."""
+    global _stooq_warmed_up
+    if _stooq_warmed_up:
+        return
+    try:
+        _STOOQ_SESSION.get("https://stooq.com/", timeout=5)
+    except Exception:
+        pass
+    _stooq_warmed_up = True
+
+
+def _yahoo_ticker_to_stooq(ticker: str) -> str:
+    """Convert a Yahoo-style ticker (e.g. 'ASML.AS', 'AAPL') to Stooq format
+    (e.g. 'asml.nl', 'aapl.us')."""
+    for suffix, stooq_suffix in _YAHOO_TO_STOOQ_SUFFIX.items():
+        if suffix and ticker.endswith(suffix):
+            base = ticker[: -len(suffix)]
+            return f"{base.replace('-', '_').replace('.', '-').lower()}.{stooq_suffix}"
+    # No recognized suffix -> assume US ticker
+    return f"{ticker.replace('-', '_').lower()}.us"
+
+
+def _stooq_download_one(ticker: str, period: str = "6mo") -> pd.DataFrame | None:
+    """Download daily OHLCV for a single ticker from Stooq. Returns None on failure."""
+    stooq_symbol = _yahoo_ticker_to_stooq(ticker)
+
+    period_days = {
+        "1mo": 35, "3mo": 100, "6mo": 200, "1y": 400, "2y": 760,
+    }.get(period, 200)
+    end = datetime.today()
+    start = end - timedelta(days=period_days)
+
+    url = (
+        f"https://stooq.com/q/d/l/?s={stooq_symbol}"
+        f"&d1={start:%Y%m%d}&d2={end:%Y%m%d}&i=d"
+    )
+
+    try:
+        resp = _STOOQ_SESSION.get(url, timeout=8)
+        if resp.status_code != 200:
+            return None
+        text = resp.text.strip()
+        # Stooq returns a plain "No data" or HTML on failure
+        if not text or text.startswith("<") or "No data" in text[:50]:
+            return None
+
+        df = pd.read_csv(StringIO(text), parse_dates=["Date"])
+        if df.empty or "Close" not in df.columns:
+            return None
+        df = df.set_index("Date").sort_index()
+        # Normalize column names to match yfinance convention
+        df = df.rename(columns={
+            "Open": "Open", "High": "High", "Low": "Low",
+            "Close": "Close", "Volume": "Volume",
+        })
+        return df
+    except Exception as e:
+        logger.debug(f"Stooq fout voor {ticker} ({stooq_symbol}): {e}")
+        return None
+
+
+def _stooq_download_batch(
+    tickers: list[str],
+    period: str = "6mo",
+    min_rows: int = 50,
+    pause: float = 0.15,
+) -> dict[str, pd.DataFrame]:
+    """Download a batch of tickers from Stooq one by one (Stooq has no
+    multi-ticker bulk endpoint, but is far more forgiving on request rate
+    than Yahoo)."""
+    _warm_up_stooq_session()
+    result = {}
+    for t in tickers:
+        df = _stooq_download_one(t, period=period)
+        if df is not None and len(df) >= min_rows:
+            result[t] = df
+        time.sleep(pause)
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Yahoo Finance via yfinance (fallback for tickers Stooq doesn't have)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _yfinance_download(
     tickers: list[str],
     period: str = "6mo",
     interval: str = "1d",
-    max_retries: int = 3,
+    max_retries: int = 2,
     min_rows: int = 50,
 ) -> dict[str, pd.DataFrame]:
-    """Download OHLCV for a batch of tickers; return {ticker: df}.
-    Retries with exponential backoff on rate-limit errors."""
+    """Download OHLCV for a batch of tickers via yfinance; return {ticker: df}.
+    Retries with backoff on rate-limit errors."""
     if not tickers:
         return {}
 
@@ -68,13 +183,13 @@ def _safe_download(
                 interval=interval,
                 group_by="ticker",
                 auto_adjust=True,
-                threads=False,   # sequential = gentler on Yahoo's rate limiter
+                threads=False,
                 progress=False,
             )
             break
         except Exception as e:
             wait = 5 * (attempt + 1)
-            logger.warning(f"Download error (attempt {attempt + 1}/{max_retries}): {e}. Wachten {wait}s…")
+            logger.warning(f"yfinance fout (poging {attempt + 1}/{max_retries}): {e}. Wachten {wait}s…")
             time.sleep(wait)
 
     if raw is None or raw.empty:
@@ -82,28 +197,48 @@ def _safe_download(
 
     result = {}
     if isinstance(raw.columns, pd.MultiIndex):
-        # MultiIndex columns: top level can be either ticker or field,
-        # depending on yfinance version. Detect which.
         level0_values = set(raw.columns.get_level_values(0))
         ohlcv_fields = {"Open", "High", "Low", "Close", "Volume", "Adj Close"}
-
         if level0_values & ohlcv_fields:
-            # columns are (field, ticker) — swap so we can slice by ticker
             raw = raw.swaplevel(0, 1, axis=1)
-
         for t in tickers:
             try:
                 df = raw[t].dropna(how="all")
                 if len(df) >= min_rows and "Close" in df.columns:
                     result[t] = df
-            except (KeyError, Exception):
+            except Exception:
                 pass
     else:
-        # Flat columns — only valid when there's exactly one ticker
         t = tickers[0]
         df = raw.dropna(how="all")
         if len(df) >= min_rows and "Close" in df.columns:
             result[t] = df
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Combined data fetch: Stooq first, yfinance fallback for misses
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _safe_download(
+    tickers: list[str],
+    period: str = "6mo",
+    interval: str = "1d",
+    min_rows: int = 50,
+    use_yfinance_fallback: bool = True,
+) -> dict[str, pd.DataFrame]:
+    """Fetch OHLCV for `tickers`, trying Stooq first (no rate limits) and
+    falling back to yfinance only for tickers Stooq couldn't provide."""
+    if not tickers:
+        return {}
+
+    result = _stooq_download_batch(tickers, period=period, min_rows=min_rows)
+
+    missing = [t for t in tickers if t not in result]
+    if missing and use_yfinance_fallback:
+        fallback = _yfinance_download(missing, period=period, interval=interval, min_rows=min_rows)
+        result.update(fallback)
+
     return result
 
 
@@ -219,8 +354,7 @@ def alpha_conditions(ind: dict, params: dict) -> tuple[bool, list[str]]:
 # Main scan function
 # ─────────────────────────────────────────────────────────────────────────────
 
-BATCH_SIZE = 20   # tickers per yfinance call — kept small to avoid Yahoo rate limits
-BATCH_PAUSE = 2.0  # seconds between batches
+BATCH_SIZE = 25   # tickers per batch (mainly relevant for yfinance fallback)
 
 def run_alpha_scan(
     tickers: list[str],
@@ -267,9 +401,6 @@ def run_alpha_scan(
 
         if progress_callback:
             progress_callback(done, total)
-
-        # pause to be polite to Yahoo's rate limiter
-        time.sleep(BATCH_PAUSE)
 
     df_hits = pd.DataFrame(hits)
     if not df_hits.empty:

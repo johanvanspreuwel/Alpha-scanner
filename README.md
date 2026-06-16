@@ -115,6 +115,10 @@ Voor elk aandeel in het universum:
 
 Support wordt berekend als het **laagste low van de afgelopen 20 handelsdagen** (excl. huidige dag). Dit is een eenvoudig maar effectief niveau om recente bodems te identificeren.
 
+### Databron
+
+De scanner haalt koersdata primair op via **Stooq** (gratis, geen API key, geen agressieve rate-limiting). Voor tickers die Stooq niet herkent — vaak Amerikaanse aandelen met een klasse-aanduiding zoals `BRK-B`, of net-genoteerde/net-gefuseerde bedrijven — valt de scanner automatisch terug op **Yahoo Finance** via `yfinance`.
+
 ---
 
 ## Uitbreiden met meer scanners

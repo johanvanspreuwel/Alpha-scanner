@@ -178,7 +178,7 @@ with st.sidebar:
     scan_btn = st.button("▶  Start scan", type="primary", use_container_width=True)
     st.markdown(
         "<div style='font-size:0.68rem;color:#8b949e;margin-top:4px'>"
-        "Een volledige scan kan 3–6 minuten duren (Yahoo Finance rate-limits)."
+        "Data via Stooq (met Yahoo Finance als terugval). Een volledige scan kan 4–10 minuten duren."
         "</div>",
         unsafe_allow_html=True,
     )
