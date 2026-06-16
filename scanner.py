@@ -52,6 +52,7 @@ def _safe_download(
     period: str = "6mo",
     interval: str = "1d",
     max_retries: int = 3,
+    min_rows: int = 50,
 ) -> dict[str, pd.DataFrame]:
     """Download OHLCV for a batch of tickers; return {ticker: df}.
     Retries with exponential backoff on rate-limit errors."""
@@ -80,19 +81,29 @@ def _safe_download(
         return {}
 
     result = {}
-    if len(tickers) == 1:
-        # single ticker — yfinance returns flat df
-        t = tickers[0]
-        if not raw.empty:
-            result[t] = raw.copy()
-    else:
+    if isinstance(raw.columns, pd.MultiIndex):
+        # MultiIndex columns: top level can be either ticker or field,
+        # depending on yfinance version. Detect which.
+        level0_values = set(raw.columns.get_level_values(0))
+        ohlcv_fields = {"Open", "High", "Low", "Close", "Volume", "Adj Close"}
+
+        if level0_values & ohlcv_fields:
+            # columns are (field, ticker) — swap so we can slice by ticker
+            raw = raw.swaplevel(0, 1, axis=1)
+
         for t in tickers:
             try:
                 df = raw[t].dropna(how="all")
-                if len(df) >= 50:
+                if len(df) >= min_rows and "Close" in df.columns:
                     result[t] = df
-            except Exception:
+            except (KeyError, Exception):
                 pass
+    else:
+        # Flat columns — only valid when there's exactly one ticker
+        t = tickers[0]
+        df = raw.dropna(how="all")
+        if len(df) >= min_rows and "Close" in df.columns:
+            result[t] = df
     return result
 
 
@@ -272,11 +283,11 @@ def run_alpha_scan(
 
 def get_chart_data(ticker: str, period: str = "6mo") -> pd.DataFrame | None:
     """Return OHLCV + RSI + SMA50 + support for a single ticker."""
-    data = _safe_download([ticker], period=period)
+    data = _safe_download([ticker], period=period, min_rows=15)
     if ticker not in data:
         return None
     df = data[ticker].copy()
-    if len(df) < 20:
+    if len(df) < 15:
         return None
     df["RSI"]     = rsi(df["Close"], length=14)
     df["SMA50"]   = sma(df["Close"], length=50)
